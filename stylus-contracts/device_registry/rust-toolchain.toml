@@ -1,0 +1,13 @@
+# --- CONFIGURATION FOR NATIVE MACOS BUILD ---
+# To build natively on macOS, UNCOMMENT the lines below.
+# This file tells Cargo which toolchain to use for local builds.
+
+[toolchain]
+channel = "nightly-2025-05-01"
+components = ["rust-src", "wasm-tools"]
+targets = ["wasm32-unknown-unknown"]
+
+# --- CONFIGURATION FOR WSL/LINUX DOCKER BUILD ---
+# For the Docker-based build on WSL/Linux, LEAVE THESE LINES COMMENTED.
+# The correct toolchain is defined and installed by the 'Dockerfile' itself,
+# so this file is not used

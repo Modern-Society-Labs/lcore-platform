@@ -1,0 +1,34 @@
+{
+  "name": "lcore-platform",
+  "version": "1.0.0",
+  "description": "L-Core Platform - Gateway and Smart Contracts",
+  "main": "src/gateway/server.js",
+  "scripts": {
+    "start": "node src/gateway/server.js",
+    "dev": "nodemon src/gateway/server.js",
+    "test": "jest",
+    "test:integration": "hardhat run test/phase2-integration.js --network kcchain",
+    "test:working": "hardhat run test/minimal-working-test.js --network kcchain",
+    "test:balance": "hardhat run test/check-balance.js --network kcchain",
+    "summary": "node test/phase2-summary.js",
+    "compile": "hardhat compile",
+    "deploy": "hardhat run scripts/deploy.js"
+  },
+  "dependencies": {
+    "@cartesi/rollups": "^1.4.5",
+    "@cartesi/util": "^6.4.0",
+    "@nomicfoundation/hardhat-ethers": "^3.0.9",
+    "@nomicfoundation/hardhat-toolbox": "^6.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.0",
+    "ethers": "^6.0.0",
+    "express": "^4.18.0",
+    "hardhat": "^2.25.0",
+    "helmet": "^7.0.0",
+    "winston": "^3.10.0"
+  },
+  "devDependencies": {
+    "jest": "^29.0.0",
+    "nodemon": "^3.0.0"
+  }
+}
