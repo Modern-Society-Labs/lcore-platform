@@ -69,19 +69,11 @@ deploy_contract() {
         exit 1
     fi
     
-    # Build contract
-    echo -e "${YELLOW}🔨 Building contract...${NC}"
-    if ! cargo build --release; then
-        echo -e "${RED}❌ Build failed for $CONTRACT_NAME${NC}"
-        exit 1
-    fi
-    
     # Deploy contract
     echo -e "${YELLOW}🚀 Deploying to KC-Chain...${NC}"
     DEPLOY_OUTPUT=$(cargo stylus deploy \
         --private-key "$PRIVATE_KEY" \
-        --endpoint "$RPC_URL" \
-        --estimate-gas-only 2>&1 || true)
+        --endpoint "$RPC_URL" 2>&1)
     
     if echo "$DEPLOY_OUTPUT" | grep -q "error\|Error\|failed\|Failed"; then
         echo -e "${RED}❌ Deployment failed for $CONTRACT_NAME${NC}"
@@ -89,14 +81,19 @@ deploy_contract() {
         exit 1
     fi
     
-    # Extract contract address if deployment succeeded
+    # Extract contract address
     ADDRESS=$(echo "$DEPLOY_OUTPUT" | grep -oE "0x[a-fA-F0-9]{40}" | head -1)
     
     if [ -n "$ADDRESS" ]; then
         echo -e "${GREEN}✅ $CONTRACT_NAME deployed successfully!${NC}"
         echo -e "${GREEN}📍 Contract Address: $ADDRESS${NC}"
+        
+        # Save address to file for later use
+        echo "$ADDRESS" > "${CONTRACT_NAME,,}_address.txt"
     else
-        echo -e "${YELLOW}⚠️ Could not extract contract address for $CONTRACT_NAME${NC}"
+        echo -e "${RED}❌ Could not extract contract address for $CONTRACT_NAME${NC}"
+        echo "$DEPLOY_OUTPUT"
+        exit 1
     fi
     
     # Generate ABI

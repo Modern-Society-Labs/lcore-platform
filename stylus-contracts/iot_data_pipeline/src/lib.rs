@@ -7,322 +7,359 @@ extern crate alloc;
 use alloc::vec::Vec;
 use alloy_sol_types::{sol, SolCall, SolValue};
 use stylus_sdk::{
-    alloy_primitives::{Address, B256, U256, U8},
+    alloy_primitives::{Address, B256, U256},
     crypto::keccak,
     prelude::*,
-    ArbResult,
-    call::static_call,
 };
 
-// Define all on-chain events for the data pipeline.
+// Simplified events for basic data marketplace
 sol! {
-    event EncryptedDataStored(bytes32 indexed data_hash, address indexed device_address, uint256 timestamp);
-    event AnalyticsComputed(bytes32 indexed analytics_hash, bytes32 indexed data_hash, uint8 analytics_type);
-    event ZkProofStored(bytes32 indexed proof_hash, bytes32 indexed analytics_hash, bool is_valid);
+    event DataSubmitted(
+        bytes32 indexed data_hash, 
+        bytes32 indexed device_id_hash, 
+        address indexed device_owner, 
+        uint256 timestamp
+    );
+    
+    event MarketplaceConfigUpdated(
+        uint256 base_fee
+        // bool is_paused  // REMOVED: Anti-decentralization pattern
+    );
 }
 
 sol_storage! {
     #[entrypoint]
     pub struct IoTDataPipeline {
-        /* --- Admin and Configuration --- */
+        /// Admin controls
         address admin;
         address rollup_contract_address;
-        address device_registry_address; // Address of the DeviceRegistry contract
-
-        /* --- Data & Proof Storage --- */
-        mapping(bytes32 => EncryptedDataRecord) encrypted_data_records;
-        mapping(address => bytes32[]) device_data_hashes;
-        mapping(bytes32 => AnalyticsComputation) analytics_computations;
-        mapping(bytes32 => ZkProof) zk_proofs;
-
-        /* --- Configuration for Analytics --- */
-        mapping(uint8 => AnalyticsConfig) analytics_configs;
-
-        /* --- Counters --- */
-        uint256 total_records;
-        uint256 total_analytics;
-        uint256 total_proofs;
+        address device_registry_address;
+        // bool is_paused;  // REMOVED: Anti-decentralization pattern
+        
+        /// Basic marketplace configuration
+        uint256 base_submission_fee;
+        
+        /// Data submission tracking
+        mapping(bytes32 => DataSubmission) data_submissions;      // data_hash -> submission info
+        mapping(bytes32 => uint256) device_submission_counts;     // device_id_hash -> count
+        mapping(address => bytes32[]) owner_data_hashes;          // owner -> list of data hashes
+        
+        /// Access control for data marketplace
+        mapping(address => mapping(address => bool)) marketplace_access; // owner -> consumer -> allowed
+        
+        /// Counters
+        uint256 total_submissions;
     }
 
-    // --- Data Structures ---
-    pub struct EncryptedDataRecord {
-        bytes encrypted_payload;
-        address device_address;
+    /// Simplified data submission record
+    pub struct DataSubmission {
+        bytes32 device_id_hash;
+        address device_owner;
         uint256 timestamp;
-        bool processed;
-    }
-
-    pub struct AnalyticsComputation {
-        bytes32 data_hash;
-        address device_address;
-        bytes analytics_payload;
-        uint8 analytics_type;
-        uint256 timestamp;
-        bool zk_proof_required;
-    }
-
-    pub struct ZkProof {
-        bytes32 analytics_hash;
-        bytes proof_payload;
-        bytes public_inputs;
-        bool is_valid;
-    }
-
-    pub struct AnalyticsConfig {
-        bool enabled;
-        uint256 processing_fee;
-        bool requires_zk_proof;
+        uint256 submission_fee_paid;
+        bool is_processed;
     }
 }
 
-/// Implementation of the IoTDataPipeline contract.
+/// Interface for DeviceRegistry contract calls
+sol! {
+    interface IDeviceRegistry {
+        function is_device_registered(bytes32 device_id_hash) external view returns (bool);
+        function get_device_owner(bytes32 device_id_hash) external view returns (address);
+        function has_access(address owner, address consumer) external view returns (bool);
+    }
+}
+
 #[public]
 impl IoTDataPipeline {
-    /// Initializes the contract, setting the admin, rollup, and registry addresses.
-    pub fn initialize(&mut self, rollup_address: Address, registry_address: Address) -> Result<(), Vec<u8>> {
+    /// Initialize the contract with basic marketplace configuration
+    pub fn initialize(
+        &mut self, 
+        rollup_address: Address, 
+        registry_address: Address,
+        base_fee: U256
+    ) -> Result<(), Vec<u8>> {
         if !self.admin.get().is_zero() {
             return Err(b"Contract already initialized".to_vec());
         }
+        
         self.admin.set(self.vm().msg_sender());
         self.rollup_contract_address.set(rollup_address);
         self.device_registry_address.set(registry_address);
-        self._initialize_analytics_configs();
+        self.base_submission_fee.set(base_fee);
+        // self.is_paused.set(false); // REMOVED: Anti-decentralization pattern
+        self.total_submissions.set(U256::ZERO);
+        
         Ok(())
     }
 
-    /// The main entrypoint called by the CartesiDApp.sol wrapper contract.
-    /// For this PoC, we assume the payload *is* the device_id for verification.
-    /// A production system would have a more complex payload format.
+    /// Main entrypoint called by Cartesi rollup
+    /// Expects payload format: device_id (raw bytes for verification)
     pub fn submit_cartesi_result(&mut self, payload: Vec<u8>) -> Result<(), Vec<u8>> {
-        // only rollup may call
+        // if self.is_paused.get() { // REMOVED: Anti-decentralization pattern
+        //     return Err(b"Pipeline is paused".to_vec());
+        // }
+        
+        // Only Cartesi rollup can call this
         if self.vm().msg_sender() != self.rollup_contract_address.get() {
-            return Err(b"Unauthorized: caller is not the rollup".to_vec());
+            return Err(b"Unauthorized: only rollup can submit".to_vec());
         }
 
-        let device_id_bytes = payload.clone();
-        let mock_encrypted_data = b"mock_encrypted_data".to_vec();
-        let data_hash = keccak(&mock_encrypted_data).into();
-        let device_id_hash = keccak(&device_id_bytes).into();
-
-        // ─── verify registration ───────────────────────────────────────────────
+        // Generate device_id_hash from payload 
+        let device_id_hash: B256 = keccak(&payload).into();
+        
+        // Verify device is registered
         let registry_addr = self.device_registry_address.get();
-        let calldata = IIoTexDeviceRegistry::is_device_registeredCall {
-            device_id_hash,
-        }
-        .abi_encode();
-
-        let bytes = static_call(&mut *self, registry_addr, &calldata)?;
-        
-        let (is_registered,) = <(bool,)>::abi_decode(&bytes, true)
-            .map_err(|_| b"Failed to decode registry response".to_vec())?;
+        let is_registered = self._verify_device_registration(registry_addr, device_id_hash)?;
         if !is_registered {
-            return Err(b"Device not registered or inactive".to_vec());
-        }
-        // ────────────────────────────────────────────────────────────────────────
-
-        // TODO: parse real device_address from payload
-        let mock_device_address = self.vm().msg_sender();
-        self._store_encrypted_data(data_hash, mock_device_address, mock_encrypted_data);
-        self._trigger_analytics(data_hash, mock_device_address, device_id_bytes);
-
-        Ok(())
-    }
-
-    /// Stores a ZK proof for a given analytics computation.
-    /// This function would be called by a trusted prover or the rollup itself.
-    pub fn store_zk_proof(
-        &mut self,
-        analytics_hash: B256,
-        proof_payload: Vec<u8>,
-        public_inputs: Vec<u8>,
-        is_valid: bool,
-    ) -> Result<(), Vec<u8>> {
-        if self.analytics_computations.getter(analytics_hash).timestamp.get().is_zero() {
-            return Err(b"Analytics computation not found".to_vec());
+            return Err(b"Device not registered".to_vec());
         }
 
-        let proof_hash: B256 = keccak(&proof_payload).into();
-        let mut proof = self.zk_proofs.setter(proof_hash);
-        proof.analytics_hash.set(analytics_hash);
-        proof.proof_payload.set_bytes(proof_payload);
-        proof.public_inputs.set_bytes(public_inputs);
-        proof.is_valid.set(is_valid);
+        // Get device owner
+        let device_owner = self._get_device_owner(registry_addr, device_id_hash)?;
+        if device_owner == Address::ZERO {
+            return Err(b"Invalid device owner".to_vec());
+        }
+
+        // Create data submission record
+        let data_hash: B256 = keccak(&[&device_id_hash.0[..], &payload].concat()).into();
+        let timestamp = self.vm().block_timestamp();
         
-        self.total_proofs.set(self.total_proofs.get() + U256::from(1));
+        let mut submission = self.data_submissions.setter(data_hash);
+        submission.device_id_hash.set(device_id_hash);
+        submission.device_owner.set(device_owner);
+        submission.timestamp.set(U256::from(timestamp));
+        submission.submission_fee_paid.set(U256::ZERO); // No fee for Cartesi submissions
+        submission.is_processed.set(true);
 
-        log(self.vm(), ZkProofStored {
-            proof_hash,
-            analytics_hash,
-            is_valid,
+        // Update tracking counters
+        let current_count = self.device_submission_counts.getter(device_id_hash).get();
+        self.device_submission_counts.setter(device_id_hash).set(current_count + U256::from(1));
+        
+        self.owner_data_hashes.setter(device_owner).grow().set(data_hash);
+        
+        let new_total = self.total_submissions.get() + U256::from(1);
+        self.total_submissions.set(new_total);
+
+        log(self.vm(), DataSubmitted {
+            data_hash,
+            device_id_hash,
+            device_owner,
+            timestamp: U256::from(timestamp),
         });
 
         Ok(())
     }
 
-    // --- Admin Functions ---
+    // ========== Access Control Functions ==========
 
-    /// Updates the address of the CartesiDApp wrapper contract.
-    pub fn set_rollup_contract(&mut self, new_address: Address) -> Result<(), Vec<u8>> {
-        if self.vm().msg_sender() != self.admin.get() {
-            return Err(b"Only admin".to_vec());
+    /// Grant marketplace access to a consumer (called by data owner)
+    pub fn grant_marketplace_access(&mut self, consumer: Address) -> Result<(), Vec<u8>> {
+        if consumer == Address::ZERO {
+            return Err(b"Invalid consumer address".to_vec());
         }
-        self.rollup_contract_address.set(new_address);
+        
+        let owner = self.vm().msg_sender();
+        self.marketplace_access.setter(owner).setter(consumer).set(true);
+        
         Ok(())
     }
 
-    /// Updates the address of the DeviceRegistry contract.
-    pub fn set_device_registry(&mut self, new_addr: Address) -> Result<(), Vec<u8>> {
-        self.only_owner()?;
-        self.device_registry_address.set(new_addr);
+    /// Revoke marketplace access from a consumer (called by data owner)
+    pub fn revoke_marketplace_access(&mut self, consumer: Address) -> Result<(), Vec<u8>> {
+        let owner = self.vm().msg_sender();
+        self.marketplace_access.setter(owner).setter(consumer).set(false);
+        
         Ok(())
     }
 
-    /// Updates the configuration for a specific analytics tier.
-    pub fn update_analytics_config(
-        &mut self,
-        analytics_type: u8,
-        enabled: bool,
-        fee: U256,
-        zk_required: bool,
-    ) -> Result<(), Vec<u8>> {
-        self.only_owner()?;
-        let key_uint = U8::from(analytics_type);
-        let mut config = self.analytics_configs.setter(key_uint);
-        config.enabled.set(enabled);
-        config.processing_fee.set(fee);
-        config.requires_zk_proof.set(zk_required);
-        Ok(())
+    /// Check if consumer has marketplace access to owner's data
+    pub fn has_marketplace_access(&mut self, owner: Address, consumer: Address) -> Result<bool, Vec<u8>> {
+        // Check both contract-level and registry-level permissions
+        let marketplace_permission = self.marketplace_access.getter(owner).getter(consumer).get();
+        
+        if !marketplace_permission {
+            // Fall back to DeviceRegistry permissions
+            let registry_addr = self.device_registry_address.get();
+            return self._check_registry_access(registry_addr, owner, consumer);
+        }
+        
+        Ok(true)
     }
 
-    // --- View Functions ---
+    // ========== Query Functions ==========
 
-    /// Returns the total number of encrypted data records stored.
-    pub fn total_records(&self) -> Result<U256, Vec<u8>> {
-        Ok(self.total_records.get())
+    /// Get total number of data submissions
+    pub fn total_submissions(&self) -> Result<U256, Vec<u8>> {
+        Ok(self.total_submissions.get())
     }
 
-    /// Returns the total number of analytics computations performed.
-    pub fn total_analytics(&self) -> Result<U256, Vec<u8>> {
-        Ok(self.total_analytics.get())
+    /// Get submission count for a specific device
+    pub fn get_device_submission_count(&self, device_id_hash: B256) -> Result<U256, Vec<u8>> {
+        Ok(self.device_submission_counts.getter(device_id_hash).get())
     }
 
-    /// Returns the total number of ZK proofs processed.
-    pub fn total_proofs(&self) -> Result<U256, Vec<u8>> {
-        Ok(self.total_proofs.get())
-    }
-
-    /// Returns the configuration for a specific analytics tier.
-    pub fn get_analytics_config(&self, analytics_type: u8) -> Result<(bool, U256, bool), Vec<u8>> {
-        let config = self.analytics_configs.getter(U8::from(analytics_type));
-        Ok((
-            config.enabled.get(),
-            config.processing_fee.get(),
-            config.requires_zk_proof.get(),
-        ))
-    }
-
-    /// Returns the list of data hashes submitted by a specific device.
-    pub fn get_device_data_hashes(&self, device_address: Address) -> Result<Vec<B256>, Vec<u8>> {
-        let hashes = self.device_data_hashes.getter(device_address);
+    /// Get data hashes submitted by an owner
+    pub fn get_owner_data_hashes(&self, owner: Address) -> Result<Vec<B256>, Vec<u8>> {
+        let hashes = self.owner_data_hashes.getter(owner);
         let mut result = Vec::with_capacity(hashes.len() as usize);
         for i in 0..hashes.len() {
-            result.push(hashes.get(i).unwrap());
+            if let Some(hash) = hashes.get(i) {
+                result.push(hash);
+            }
         }
         Ok(result)
     }
 
-    /// Simple liveness check; returns 1 if contract is reachable.
+    /// Get submission information by data hash
+    pub fn get_submission_info(&self, data_hash: B256) -> Result<(B256, Address, U256, bool), Vec<u8>> {
+        let submission = self.data_submissions.getter(data_hash);
+        Ok((
+            submission.device_id_hash.get(),
+            submission.device_owner.get(),
+            submission.timestamp.get(),
+            submission.is_processed.get(),
+        ))
+    }
+
+    // ========== Admin Functions ==========
+
+    /// Get contract owner
+    pub fn owner(&self) -> Result<Address, Vec<u8>> {
+        Ok(self.admin.get())
+    }
+
+    /// Update rollup contract address
+    pub fn set_rollup_contract(&mut self, new_address: Address) -> Result<(), Vec<u8>> {
+        self.only_admin()?;
+        self.rollup_contract_address.set(new_address);
+        Ok(())
+    }
+
+    /// Update device registry address
+    pub fn set_device_registry(&mut self, new_address: Address) -> Result<(), Vec<u8>> {
+        self.only_admin()?;
+        self.device_registry_address.set(new_address);
+        Ok(())
+    }
+
+    /// Update base submission fee
+    pub fn set_base_fee(&mut self, new_fee: U256) -> Result<(), Vec<u8>> {
+        self.only_admin()?;
+        self.base_submission_fee.set(new_fee);
+        
+        log(self.vm(), MarketplaceConfigUpdated {
+            base_fee: new_fee,
+        });
+        
+        Ok(())
+    }
+
+    /// Set paused state
+    // pub fn set_paused(&mut self, paused: bool) -> Result<(), Vec<u8>> {  // REMOVED: Anti-decentralization
+    //     self.only_admin()?;
+    //     // self.is_paused.set(paused); // REMOVED: Anti-decentralization pattern
+    //     
+    //     log(self.vm(), MarketplaceConfigUpdated {
+    //         base_fee: self.base_submission_fee.get(),
+    //         // is_paused: paused, // REMOVED: Anti-decentralization pattern
+    //     });
+    //     
+    //     Ok(())
+    // }
+
+    /// Simple liveness check
     pub fn ping(&self) -> Result<U256, Vec<u8>> {
         Ok(U256::from(1))
     }
-
-    /// Minimal method solely to trigger ABI generation.
-    pub fn abi_test(&self) -> ArbResult {
-        Ok(Vec::new())
-    }
 }
 
-/// Internal helper functions for the data pipeline.
+// Private helper functions
 impl IoTDataPipeline {
-    /// mirror of registry.only_owner()
-    fn only_owner(&self) -> Result<(), Vec<u8>> {
+    /// Ensure only admin can call
+    fn only_admin(&self) -> Result<(), Vec<u8>> {
         if self.vm().msg_sender() != self.admin.get() {
-            return Err(b"Only admin".to_vec());
+            return Err(b"Only admin can call this function".to_vec());
         }
         Ok(())
     }
-    
-    /// Stores the encrypted data payload and emits an event.
-    fn _store_encrypted_data(&mut self, data_hash: B256, device_address: Address, payload: Vec<u8>) {
-        let timestamp = self.vm().block_timestamp();
-        let mut record = self.encrypted_data_records.setter(data_hash);
+
+    /// Verify device registration via static call to DeviceRegistry
+    fn _verify_device_registration(&mut self, registry_addr: Address, device_id_hash: B256) -> Result<bool, Vec<u8>> {
+        let calldata = IDeviceRegistry::is_device_registeredCall { device_id_hash }.abi_encode();
+        let response = self.vm().static_call(&self, registry_addr, &calldata)?;
         
-        record.encrypted_payload.set_bytes(payload.clone());
-        record.device_address.set(device_address);
-        record.timestamp.set(U256::from(timestamp));
-        record.processed.set(false);
+        let (is_registered,) = <(bool,)>::abi_decode(&response, true)
+            .map_err(|_| b"Failed to decode registry response".to_vec())?;
+        
+        Ok(is_registered)
+    }
 
-        self.device_data_hashes.setter(device_address).push(data_hash);
-        self.total_records.set(self.total_records.get() + U256::from(1));
+    /// Get device owner via static call to DeviceRegistry
+    fn _get_device_owner(&mut self, registry_addr: Address, device_id_hash: B256) -> Result<Address, Vec<u8>> {
+        let calldata = IDeviceRegistry::get_device_ownerCall { device_id_hash }.abi_encode();
+        let response = self.vm().static_call(&self, registry_addr, &calldata)?;
+        
+        let (owner,) = <(Address,)>::abi_decode(&response, true)
+            .map_err(|_| b"Failed to decode owner response".to_vec())?;
+        
+        Ok(owner)
+    }
 
-        log(self.vm(), EncryptedDataStored {
-            data_hash,
-            device_address,
-            timestamp: U256::from(timestamp),
+    /// Check registry-level access permissions
+    fn _check_registry_access(&mut self, registry_addr: Address, owner: Address, consumer: Address) -> Result<bool, Vec<u8>> {
+        let calldata = IDeviceRegistry::has_accessCall { owner, consumer }.abi_encode();
+        let response = self.vm().static_call(&self, registry_addr, &calldata)?;
+        
+        let (has_access,) = <(bool,)>::abi_decode(&response, true)
+            .map_err(|_| b"Failed to decode access response".to_vec())?;
+        
+        Ok(has_access)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stylus_sdk::{test_helpers, alloy_primitives::address};
+
+    #[test]
+    fn test_basic_initialization() {
+        let mut contract = IoTDataPipeline::new();
+        let admin_address = address!("0000000000000000000000000000000000000001");
+        let rollup_address = address!("0000000000000000000000000000000000000002");
+        let registry_address = address!("0000000000000000000000000000000000000003");
+
+        test_helpers::with_sender(admin_address, || {
+            let result = contract.initialize(rollup_address, registry_address, U256::from(100));
+            assert!(result.is_ok(), "Initialization should succeed");
+            assert_eq!(contract.owner().unwrap(), admin_address);
+            assert_eq!(contract.total_submissions().unwrap(), U256::ZERO);
         });
     }
 
-    /// Triggers an analytics computation based on the data.
-    fn _trigger_analytics(&mut self, data_hash: B256, device_address: Address, payload: Vec<u8>) {
-        // For now, we'll hardcode to the "basic" analytics type (0).
-        // A real implementation might determine the type from the payload or device registry.
-        let analytics_type = 0; 
-        let analytics_hash: B256 = keccak(&payload).into();
-        let timestamp = self.vm().block_timestamp();
-        let config = self.analytics_configs.get(U8::from(analytics_type));
-        let mut computation = self.analytics_computations.setter(analytics_hash);
+    #[test]
+    fn test_marketplace_access_control() {
+        let mut contract = IoTDataPipeline::new();
+        let owner_address = address!("0000000000000000000000000000000000000001");
+        let consumer_address = address!("0000000000000000000000000000000000000002");
 
-        computation.data_hash.set(data_hash);
-        computation.device_address.set(device_address);
-        computation.analytics_payload.set_bytes(payload);
-        computation.analytics_type.set(U8::from(analytics_type));
-        computation.timestamp.set(U256::from(timestamp));
-        computation.zk_proof_required.set(config.requires_zk_proof.get());
-        
-        let new_total = self.total_analytics.get() + U256::from(1);
-        self.total_analytics.set(new_total);
+        test_helpers::with_sender(owner_address, || {
+            // Grant access
+            let result = contract.grant_marketplace_access(consumer_address);
+            assert!(result.is_ok(), "Access grant should succeed");
 
-        log(self.vm(), AnalyticsComputed {
-            analytics_hash,
-            data_hash,
-            analytics_type,
+            // Check access
+            let has_access = contract.marketplace_access.getter(owner_address).getter(consumer_address).get();
+            assert!(has_access, "Consumer should have access");
+
+            // Revoke access
+            let result = contract.revoke_marketplace_access(consumer_address);
+            assert!(result.is_ok(), "Access revoke should succeed");
+
+            // Check access revoked
+            let has_access = contract.marketplace_access.getter(owner_address).getter(consumer_address).get();
+            assert!(!has_access, "Consumer should not have access");
         });
-    }
-    
-    /// Sets up the default configurations for the analytics tiers.
-    fn _initialize_analytics_configs(&mut self) {
-        // Basic analytics config
-        let mut basic_config = self.analytics_configs.setter(U8::from(0));
-        basic_config.enabled.set(true);
-        basic_config.processing_fee.set(U256::ZERO);
-        basic_config.requires_zk_proof.set(false);
-
-        // Advanced analytics config
-        let mut advanced_config = self.analytics_configs.setter(U8::from(1));
-        advanced_config.enabled.set(true);
-        advanced_config.processing_fee.set(U256::from(10u64.pow(15))); // 0.001 ETH
-        advanced_config.requires_zk_proof.set(true);
-
-        // ML analytics config
-        let mut ml_config = self.analytics_configs.setter(U8::from(2));
-        ml_config.enabled.set(true);
-        ml_config.processing_fee.set(U256::from(10u64.pow(16))); // 0.01 ETH
-        ml_config.requires_zk_proof.set(true);
-    }
-} 
-
-sol! {
-    interface IIoTexDeviceRegistry {
-        function is_device_registered(bytes32 device_id_hash) external view returns (bool);
     }
 } 

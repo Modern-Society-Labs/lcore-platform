@@ -23,6 +23,10 @@ async function main() {
     console.log("⚠️ No .cartesi/image/hash found, using placeholder templateHash");
   }
   
+  // Override with our v1.8 hash
+  templateHash = "0xcd3444ae83dff94c89bd653a4bf7cb76ac3198108237b7f5310c9eb959818698";
+  console.log("✅ Using v1.8 templateHash:", templateHash);
+  
   // 1. Deploy InputBox (mandatory for the whole chain)
   console.log("\n📦 Deploying InputBox...");
   const InputBox = await ethers.getContractFactory("InputBox");

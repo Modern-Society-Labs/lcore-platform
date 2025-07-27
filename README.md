@@ -7,8 +7,8 @@ The L{CORE} Platform provides enterprise-grade Stylus smart contracts for IoT de
 ## Smart Contracts
 
 ### DeviceRegistry Contract
-- **Address:** `0xf6a237c01d927c7c8bbf9fdd5eb5de53dbf99f0f`
-- **Size:** 39KB bytecode
+- **Address:** `0x738b0ee9fa13e995bb64906207ad12d45f9bceeb`
+- **Size:** 23.3KB bytecode (v5 - optimized for devnet)
 - **Features:**
   - W3C DID-compliant device registration
   - ES-256 signature verification
@@ -148,3 +148,18 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ---
 
 **Made with ❤️ by the L{CORE} Team**
+
+## Current Contract Addresses (KC-Chain)
+
+### Stylus Contracts
+- DeviceRegistry: `0xc3cf289e7d0167a857c28662e673ca7a06d3a461` (v8)
+- IoTDataPipeline: `0xc58451db383aaadac88895bf20d7e08db2c92b41` (v5)
+
+### Cartesi Infrastructure (v1.62)
+- InputBox: `0xe201caC802942E066b8a26ca7B1d1906942B7d3d`
+- Authority: `0x8A14E15d0DEE2d83225A183C75c1AafDf8F92612`
+- CartesiDApp: `0xe1D2A5095B63312CA3E4E090Dc273901d7841c27`
+- CartesiDAppFactory: `0x3283aedB2516500A663B50Ac311212642b7b6C34`
+- Machine Hash: `0xfffa40f7a93130db5edcee0189f986aff3af90178c5bcb5914c22ead21bfef5c`
+
+Deployment: July 27, 2025 (Blocks ~84230-84235)

@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Build artifacts
+/.cartesi/
+/cache/
+/stylus-contracts/*/target/
+/cartesi-contracts/cache/
+/cartesi-contracts/artifacts/
+/cartesi-contracts/deployments/
+/cartesi-contracts/typechain-types/
+
+# Rust build artifacts
+**/target/
+Cargo.lock
+
+# Environment files
+*.env
+!*.env.example
+variables
+
+# Contract deployment files
+**/abi.json
+**/*_address.txt
+
+# Temporary files
+*.tmp
+*.bak
+*.old
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Hardhat
+/cache/
+/artifacts/
+
+# TypeChain
+/typechain-types/
